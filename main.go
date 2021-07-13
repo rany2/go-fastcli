@@ -217,8 +217,8 @@ func main() {
 		fmt.Printf("  %d: %s, %s.\n", d+1,
 			i.(map[string]interface{})["location"].(map[string]interface{})["city"],
 			i.(map[string]interface{})["location"].(map[string]interface{})["country"])
-	}*/
-	fmt.Println()
+	}
+	fmt.Println()*/
 
 	currentSpeed := make(chan uint, 1)
 	doneChan := make(chan bool, 1)
