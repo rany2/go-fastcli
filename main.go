@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"net/http/httptrace"
 	"log"
 	"io/ioutil"
 	"encoding/json"
@@ -35,6 +36,32 @@ func (c *BytesCounter) Read(p []byte) (int, error) {
 	}
 	c.uploadchan <- uint(len(p))
 	return len(p), nil
+}
+
+// Format range of the fast.com test URL
+func format_fasturl(url string, rangeEnd int) string {
+	return strings.Replace(url, "/speedtest?", "/speedtest/range/0-"+strconv.Itoa(rangeEnd)+ "?", -1)
+}
+
+// Ping URL function
+func ping_url(url string, done chan bool, result chan float64) {
+	defer announce_death(done)
+	req, _ := http.NewRequest("GET", url, nil)
+	var t1, t2 time.Time
+	trace := &httptrace.ClientTrace{
+		ConnectStart: func(_, _ string) {
+			t1 = time.Now()
+		},
+		ConnectDone: func(net, addr string, err error) {
+			t2 = time.Now()
+		},
+	}
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
+	_, err := http.DefaultTransport.RoundTrip(req)
+	if err != nil {
+		log.Fatal(err)
+	}
+	result <- float64(time.Duration(t2.Sub(t1)))/1000000
 }
 
 // To announce the death of the goroutine
@@ -139,6 +166,7 @@ func upload_file(url string, done chan bool, timeout int64, speed chan uint) {
 
 
 func main() {
+	latencyBool := flag.Bool("latency", false, "run latency test")
 	downloadBool := flag.Bool("download", false, "run download test")
 	uploadBool := flag.Bool("upload", false, "run upload test")
 	parallelPerURL := flag.Int("test_per_url", 2, "run test x times per url")
@@ -147,9 +175,13 @@ func main() {
 	flag.Parse()
 
 	testsToRun := []string{}
-	if !*downloadBool && !*uploadBool {
+	if !*downloadBool && !*uploadBool && !*latencyBool {
 		*downloadBool = true
 		*uploadBool = true
+		*latencyBool = true
+	}
+	if *latencyBool {
+		testsToRun = append(testsToRun, "latency")
 	}
 	if *downloadBool {
 		testsToRun = append(testsToRun, "download")
@@ -175,23 +207,31 @@ func main() {
 
 		currentSpeed := make(chan uint, 1)
 		doneChan := make(chan bool, 1)
+		pingChan := make(chan float64, 1)
 		for _, test := range testsToRun {
 		//for _, test := range []string{"upload"} {
 			totalTimes := 0 // to detect when all download goroutines are done
 			for _, i := range m["targets"].([]interface{}) {
-				var testUrl = strings.Replace(i.(map[string]interface{})["url"].(string), "/speedtest?", "/speedtest/range/0-26214400?", -1)
-				for j := 0; j < *parallelPerURL; j++ { // 8 parallel for now
-					if test == "download" {
-						go download_file (testUrl, doneChan, *maxTimeInTest, currentSpeed)
-					} else {
-						go upload_file (testUrl, doneChan, *maxTimeInTest, currentSpeed)
-					}
+				if test == "latency" {
+					var testUrl = format_fasturl(i.(map[string]interface{})["url"].(string), 0)
+					go ping_url (testUrl, doneChan, pingChan)
 					totalTimes++
+				} else {
+					var testUrl = format_fasturl(i.(map[string]interface{})["url"].(string), 26214400)
+					for j := 0; j < *parallelPerURL; j++ { // 8 parallel for now
+						if test == "download" {
+							go download_file (testUrl, doneChan, *maxTimeInTest, currentSpeed)
+						} else if test == "upload" {
+							go upload_file (testUrl, doneChan, *maxTimeInTest, currentSpeed)						
+						}
+						totalTimes++
+					}
 				}
 			}
 
 			var startTime = time.Now().Unix()
 			var totalDl = uint(0)
+			var totalPing []float64
 			outer:
 				for {
 					select {
@@ -203,9 +243,20 @@ func main() {
 						} else {
 							fmt.Printf ("\r\033[KUpload: %0.3f Mbps", speedMbps)
 						}
+					case c := <- pingChan:
+						totalPing = append (totalPing, c)
 					case <- doneChan:
 						totalTimes--
 						if totalTimes == 0 {
+							if test == "latency" {
+								var m = float64(0)
+								for i, e := range totalPing {
+									if i == 0 || e < m {
+										m = e
+									}
+								}
+								fmt.Printf ("\r\033[KPing: %0.3f ms", m)
+							}
 							break outer
 						}
 					default:
