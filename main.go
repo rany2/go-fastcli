@@ -2,13 +2,13 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"golang.org/x/term"
+	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -20,12 +20,18 @@ import (
 )
 
 // Create HTTP transports to share pool of connections while disabling compression
-var tr = &http.Transport{DisableCompression: true}
-var client = &http.Client{Transport: tr}
+var tr = &http.Transport{
+	DisableCompression: true,
+}
+var client = &http.Client{
+	Transport: tr,
+}
 
 // BytesCounter implements io.Reader interface, for counting bytes being written in HTTP requests
 type BytesCounter struct {
 	uploadchan chan uint
+	readIndex  int64
+	maxIndex   int64
 }
 
 func NewCounter() *BytesCounter {
@@ -33,12 +39,20 @@ func NewCounter() *BytesCounter {
 }
 
 // Read implements io.Reader for Upload tests
-func (c *BytesCounter) Read(p []byte) (int, error) {
-	for i, b := range bytes.Repeat([]byte("a"), len(p)) {
-		p[i] = b
+func (c *BytesCounter) Read(p []byte) (n int, err error) {
+	if c.readIndex >= c.maxIndex {
+		err = io.EOF
+		return
 	}
-	c.uploadchan <- uint(len(p))
-	return len(p), nil
+
+	for i, _ := range p {
+		p[i] = 'a'
+	}
+
+	n = len(p)
+	c.readIndex += int64(n)
+	c.uploadchan <- uint(n)
+	return
 }
 
 // Format range of the fast.com test URL
@@ -132,6 +146,7 @@ func UploadFile(url string, done chan bool, timeout int64, speed chan uint) {
 	// Create counter to measure upload speed
 	counter := NewCounter()
 	counter.uploadchan = speed
+	counter.maxIndex = int64(26214400)
 
 	// Make new request to download URL
 	req, err := http.NewRequest("POST", url, counter)
@@ -146,6 +161,7 @@ func UploadFile(url string, done chan bool, timeout int64, speed chan uint) {
 
 	// Execute the request
 	for { // run until limit
+		counter.readIndex = int64(0) // reset index
 		resp, err := client.Do(req)
 		if err != nil {
 			return
@@ -232,7 +248,7 @@ func main() {
 				totalTimes++
 			} else {
 				var testUrl = FormatFastURL(i.(map[string]interface{})["url"].(string), 26214400)
-				for j := 0; j < *parallelPerURL; j++ { // 8 parallel for now
+				for j := 0; j < *parallelPerURL; j++ {
 					if test == "download" {
 						go DownloadFile(testUrl, doneChan, *maxTimeInTest, currentSpeed)
 					} else if test == "upload" {
