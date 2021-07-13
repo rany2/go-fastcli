@@ -207,12 +207,23 @@ func main() {
 	if err := json.Unmarshal(bodyBytes, &m); err != nil {
 		log.Fatal(err)
 	}
+	fmt.Printf("Testing from %s, AS%s, %s, %s.\n",
+		m["client"].(map[string]interface{})["ip"],
+		m["client"].(map[string]interface{})["asn"],
+		m["client"].(map[string]interface{})["location"].(map[string]interface{})["city"],
+		m["client"].(map[string]interface{})["location"].(map[string]interface{})["country"])
+	/*fmt.Printf("Testing to %d servers:\n", len(m["targets"].([]interface{})))
+	for d, i := range m["targets"].([]interface{}) {
+		fmt.Printf("  %d: %s, %s.\n", d+1,
+			i.(map[string]interface{})["location"].(map[string]interface{})["city"],
+			i.(map[string]interface{})["location"].(map[string]interface{})["country"])
+	}*/
+	fmt.Println()
 
 	currentSpeed := make(chan uint, 1)
 	doneChan := make(chan bool, 1)
 	pingChan := make(chan float64, 1)
 	for _, test := range testsToRun {
-		//for _, test := range []string{"upload"} {
 		totalTimes := 0 // to detect when all download goroutines are done
 		for _, i := range m["targets"].([]interface{}) {
 			if test == "latency" {
