@@ -8,12 +8,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"golang.org/x/crypto/ssh/terminal"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"net/http/httptrace"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -233,16 +235,19 @@ func main() {
 		var startTime = time.Now().Unix()
 		var totalDl = uint(0)
 		var totalPing []float64
+		var speedMbps = float64(0)
 	outer:
 		for {
 			select {
 			case c := <-currentSpeed:
 				totalDl += c
-				var speedMbps = float64(totalDl) / float64(time.Now().Unix()-startTime) / 125000
-				if test == "download" {
-					fmt.Printf("\r\033[KDownload: %0.3f Mbps", speedMbps)
-				} else {
-					fmt.Printf("\r\033[KUpload: %0.3f Mbps", speedMbps)
+				speedMbps = float64(totalDl) / float64(time.Now().Unix()-startTime) / 125000
+				if terminal.IsTerminal(syscall.Stdout) {
+					if test == "download" {
+						fmt.Printf("\r\033[KDownload: %0.3f Mbps", speedMbps)
+					} else {
+						fmt.Printf("\r\033[KUpload: %0.3f Mbps", speedMbps)
+					}
 				}
 			case c := <-pingChan:
 				totalPing = append(totalPing, c)
@@ -256,7 +261,13 @@ func main() {
 								m = e
 							}
 						}
-						fmt.Printf("\r\033[KPing: %0.3f ms", m)
+						fmt.Printf("Ping: %0.3f ms", m)
+					} else if !terminal.IsTerminal(syscall.Stdout) {
+						if test == "download" {
+							fmt.Printf("Download: %0.3f Mbps", speedMbps)
+						} else if test == "upload" {
+							fmt.Printf("Upload: %0.3f Mbps", speedMbps)
+						}
 					}
 					break outer
 				}
