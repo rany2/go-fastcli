@@ -8,7 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"golang.org/x/crypto/ssh/terminal"
+	"golang.org/x/term"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -242,7 +242,7 @@ func main() {
 			case c := <-currentSpeed:
 				totalDl += c
 				speedMbps = float64(totalDl) / float64(time.Now().Unix()-startTime) / 125000
-				if terminal.IsTerminal(syscall.Stdout) {
+				if term.IsTerminal(syscall.Stdout) {
 					if test == "download" {
 						fmt.Printf("\r\033[KDownload: %0.3f Mbps", speedMbps)
 					} else {
@@ -262,7 +262,7 @@ func main() {
 							}
 						}
 						fmt.Printf("Ping: %0.3f ms", m)
-					} else if !terminal.IsTerminal(syscall.Stdout) {
+					} else if !term.IsTerminal(syscall.Stdout) {
 						if test == "download" {
 							fmt.Printf("Download: %0.3f Mbps", speedMbps)
 						} else if test == "upload" {
