@@ -184,9 +184,10 @@ func main() {
 	latencyBool := flag.Bool("latency", false, "run latency test")
 	downloadBool := flag.Bool("download", false, "run download test")
 	uploadBool := flag.Bool("upload", false, "run upload test")
-	parallelPerURL := flag.Int("test_per_url", 2, "run test x times per url")
-	maxTimeInTest := flag.Int64("test_time", 30, "total time for each test")
-	urlsToTest := flag.Int("url_to_test", 5, "number of urls to get from api")
+	parallelPerURL := flag.Int("test-per-url", 2, "run test x times per url")
+	maxTimeInTest := flag.Int64("test-time", 30, "total time for each test")
+	urlsToTest := flag.Int("url-to-test", 5, "number of urls to request from api")
+	pingTimes := flag.Int("ping-times", 8, "for latency test ping url x times")
 	flag.Parse()
 
 	testsToRun := []string{}
@@ -244,8 +245,10 @@ func main() {
 		for _, i := range m["targets"].([]interface{}) {
 			if test == "latency" {
 				var testUrl = FormatFastURL(i.(map[string]interface{})["url"].(string), 0)
-				go PingURL(testUrl, doneChan, pingChan)
-				totalTimes++
+				for j := 0; j <*pingTimes; j++ {
+					go PingURL(testUrl, doneChan, pingChan)
+					totalTimes++
+				}
 			} else {
 				var testUrl = FormatFastURL(i.(map[string]interface{})["url"].(string), 26214400)
 				for j := 0; j < *parallelPerURL; j++ {
