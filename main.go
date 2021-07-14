@@ -9,8 +9,10 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptrace"
+	"net/url"
 	"strconv"
 	"strings"
 	"syscall"
@@ -19,11 +21,17 @@ import (
 
 // Create HTTP transports to share pool of connections while disabling compression
 var tr = &http.Transport{
-	DisableKeepAlives:   false,
-	DisableCompression:  true,
-	MaxIdleConns:        0,
-	MaxIdleConnsPerHost: 0,
-	MaxConnsPerHost:     0,
+	Proxy: http.ProxyFromEnvironment,
+	DialContext: (&net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).DialContext,
+	ForceAttemptHTTP2:     true,
+	MaxIdleConns:          100,
+	IdleConnTimeout:       90 * time.Second,
+	TLSHandshakeTimeout:   10 * time.Second,
+	ExpectContinueTimeout: 1 * time.Second,
+	DisableCompression:    true,
 }
 var client = &http.Client{
 	Transport: tr,
@@ -95,7 +103,7 @@ func AnnounceDeath(done chan bool) {
 	done <- true
 }
 
-func DownloadFile(url string, done chan bool, timeout int64, speed chan uint) {
+func DownloadFile(url string, done chan bool, timeout float64, speed chan uint) {
 	// Send done to channel on death of function
 	defer AnnounceDeath(done)
 
@@ -130,7 +138,7 @@ func DownloadFile(url string, done chan bool, timeout int64, speed chan uint) {
 	}
 }
 
-func UploadFile(url string, done chan bool, timeout int64, speed chan uint) {
+func UploadFile(url string, done chan bool, timeout float64, speed chan uint) {
 	// Send done to channel on death of function
 	defer AnnounceDeath(done)
 
@@ -174,9 +182,11 @@ func main() {
 	downloadBool := flag.Bool("download", false, "run download test")
 	uploadBool := flag.Bool("upload", false, "run upload test")
 	parallelPerURL := flag.Int("test-per-url", 2, "run test x times per url")
-	maxTimeInTest := flag.Int64("test-time", 30, "total time for each test")
+	maxTimeInTest := flag.Float64("test-time", 30, "total time for each test")
 	urlsToTest := flag.Int("url-to-test", 5, "number of urls to request from api")
 	pingTimes := flag.Int("ping-times", 8, "for latency test ping url x times")
+	ipv4Bool := flag.Bool("ipv4", false, "use ipv4")
+	ipv6Bool := flag.Bool("ipv6", false, "use ipv6")
 	flag.Parse()
 
 	testsToRun := []string{}
@@ -194,6 +204,26 @@ func main() {
 	if *uploadBool {
 		testsToRun = append(testsToRun, "upload")
 	}
+
+	var dialContext func(ctx context.Context, network, addr string) (net.Conn, error)
+	defaultDialer := http.DefaultTransport.(*http.Transport).Clone()
+	if *ipv4Bool && *ipv6Bool {
+		log.Fatal("-ipv4 and -ipv6 are mutually exclusive")
+	} else if *ipv4Bool {
+		dialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			return defaultDialer.DialContext(ctx, "tcp4", address)
+		}
+	} else if *ipv6Bool {
+		dialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			return defaultDialer.DialContext(ctx, "tcp6", address)
+		}
+	} else {
+		dialContext = defaultDialer.DialContext
+	}
+	tr.DialContext = dialContext
+	api_tr := http.DefaultTransport.(*http.Transport).Clone()
+	api_tr.DialContext = dialContext
+	http.DefaultClient.Transport = api_tr
 
 	resp, err := http.Get("https://api.fast.com/netflix/speedtest/v2?https=true&token=YXNkZmFzZGxmbnNkYWZoYXNkZmhrYWxm&urlCount=" + strconv.Itoa(*urlsToTest))
 	if err != nil {
@@ -213,24 +243,29 @@ func main() {
 	if err := json.Unmarshal(bodyBytes, &m); err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("Testing from %s, AS%s, %s, %s.\n",
+	fmt.Printf("Testing from %s, AS%s, %s, %s\n",
 		m["client"].(map[string]interface{})["ip"],
 		m["client"].(map[string]interface{})["asn"],
 		m["client"].(map[string]interface{})["location"].(map[string]interface{})["city"],
 		m["client"].(map[string]interface{})["location"].(map[string]interface{})["country"])
-	/*fmt.Printf("Testing to %d servers:\n", len(m["targets"].([]interface{})))
+	fmt.Printf("Testing to %d servers:\n", len(m["targets"].([]interface{})))
 	for d, i := range m["targets"].([]interface{}) {
-		fmt.Printf("  %d: %s, %s.\n", d+1,
+		u, err := url.Parse(i.(map[string]interface{})["url"].(string))
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Printf("  %d) %s, %s, %s\n", d+1,
+			u.Host,
 			i.(map[string]interface{})["location"].(map[string]interface{})["city"],
 			i.(map[string]interface{})["location"].(map[string]interface{})["country"])
 	}
-	fmt.Println()*/
+	fmt.Println()
 
 	currentSpeed := make(chan uint, 1)
 	doneChan := make(chan bool, 1)
 	pingChan := make(chan float64, 1)
 	for _, test := range testsToRun {
-		totalTimes := 0 // to detect when all download goroutines are done
+		totalTimes := 0 // to detect when all goroutines are done
 		for _, i := range m["targets"].([]interface{}) {
 			if test == "latency" {
 				var testUrl = FormatFastURL(i.(map[string]interface{})["url"].(string), 0)
@@ -255,6 +290,7 @@ func main() {
 		var totalDl = uint(0)
 		var totalPing []float64
 		var speedMbps = float64(0)
+
 	outer:
 		for {
 			select {
@@ -263,9 +299,9 @@ func main() {
 				speedMbps = float64(totalDl) / float64(time.Now().Unix()-startTime) / 125000
 				if term.IsTerminal(syscall.Stdout) {
 					if test == "download" {
-						fmt.Printf("\r\033[KDownload: %0.3f Mbps", speedMbps)
+						fmt.Printf("\r\033[KDownload   %0.3f Mbps", speedMbps)
 					} else {
-						fmt.Printf("\r\033[KUpload: %0.3f Mbps", speedMbps)
+						fmt.Printf("\r\033[KUpload     %0.3f Mbps", speedMbps)
 					}
 				}
 			case c := <-pingChan:
@@ -280,12 +316,12 @@ func main() {
 								m = e
 							}
 						}
-						fmt.Printf("Ping: %0.3f ms", m)
+						fmt.Printf("Ping       %0.3f ms", m)
 					} else if !term.IsTerminal(syscall.Stdout) {
 						if test == "download" {
-							fmt.Printf("Download: %0.3f Mbps", speedMbps)
+							fmt.Printf("Download   %0.3f Mbps", speedMbps)
 						} else if test == "upload" {
-							fmt.Printf("Upload: %0.3f Mbps", speedMbps)
+							fmt.Printf("Upload     %0.3f Mbps", speedMbps)
 						}
 					}
 					break outer
