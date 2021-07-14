@@ -1,10 +1,8 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"golang.org/x/term"
@@ -21,7 +19,11 @@ import (
 
 // Create HTTP transports to share pool of connections while disabling compression
 var tr = &http.Transport{
-	DisableCompression: true,
+	DisableKeepAlives:   false,
+	DisableCompression:  true,
+	MaxIdleConns:        0,
+	MaxIdleConnsPerHost: 0,
+	MaxConnsPerHost:     0,
 }
 var client = &http.Client{
 	Transport: tr,
@@ -29,9 +31,9 @@ var client = &http.Client{
 
 // BytesCounter implements io.Reader interface, for counting bytes being written in HTTP requests
 type BytesCounter struct {
-	uploadchan chan uint
-	readIndex  int64
-	maxIndex   int64
+	speedChannel chan uint
+	readIndex    int64
+	maxIndex     int64
 }
 
 func NewCounter() *BytesCounter {
@@ -51,7 +53,14 @@ func (c *BytesCounter) Read(p []byte) (n int, err error) {
 
 	n = len(p)
 	c.readIndex += int64(n)
-	c.uploadchan <- uint(n)
+	c.speedChannel <- uint(n)
+	return
+}
+
+// Write implements io.Writer for Download tests
+func (c *BytesCounter) Write(p []byte) (n int, err error) {
+	n = len(p)
+	c.speedChannel <- uint(len(p))
 	return
 }
 
@@ -97,6 +106,10 @@ func DownloadFile(url string, done chan bool, timeout int64, speed chan uint) {
 	// Make sure operation is cancelled on exit
 	defer cancel()
 
+	// Create counter to measure download speed
+	counter := NewCounter()
+	counter.speedChannel = speed
+
 	// Make new request to download URL
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -106,29 +119,14 @@ func DownloadFile(url string, done chan bool, timeout int64, speed chan uint) {
 	// Associate the cancellable context we just created to the request
 	req = req.WithContext(ctx)
 
-	// Execute the request
-	for { // run until limit
+	// Execute the request until we reach the timeout
+	for {
 		resp, err := client.Do(req)
 		if err != nil {
-			if errors.Is(err, context.DeadlineExceeded) {
-				return
-			} else {
-				log.Fatal(err)
-			}
+			return
 		}
 		defer resp.Body.Close()
-
-		// Read body response in chunks to measure speed
-		reader := bufio.NewReader(resp.Body)
-		part := make([]byte, 32768) // reasonable buffer
-		for {
-			count, err := reader.Read(part)
-			if err != nil {
-				break
-			} else {
-				speed <- uint(len(string(part[:count])))
-			}
-		}
+		io.Copy(counter, resp.Body)
 	}
 }
 
@@ -145,7 +143,7 @@ func UploadFile(url string, done chan bool, timeout int64, speed chan uint) {
 
 	// Create counter to measure upload speed
 	counter := NewCounter()
-	counter.uploadchan = speed
+	counter.speedChannel = speed
 	counter.maxIndex = int64(26214400)
 
 	// Make new request to download URL
@@ -159,24 +157,15 @@ func UploadFile(url string, done chan bool, timeout int64, speed chan uint) {
 	// Associate the cancellable context we just created to the request
 	req = req.WithContext(ctx)
 
-	// Execute the request
-	for { // run until limit
-		counter.readIndex = int64(0) // reset index
+	// Execute the request until we reach the timeout
+	for {
+		// Reset the index back to 0
+		counter.readIndex = int64(0)
 		resp, err := client.Do(req)
 		if err != nil {
 			return
 		}
 		defer resp.Body.Close()
-
-		// Read body response in chunks
-		reader := bufio.NewReader(resp.Body)
-		part := make([]byte, 32768)
-		for {
-			_, err := reader.Read(part)
-			if err != nil {
-				break
-			}
-		}
 	}
 }
 
@@ -245,7 +234,7 @@ func main() {
 		for _, i := range m["targets"].([]interface{}) {
 			if test == "latency" {
 				var testUrl = FormatFastURL(i.(map[string]interface{})["url"].(string), 0)
-				for j := 0; j <*pingTimes; j++ {
+				for j := 0; j < *pingTimes; j++ {
 					go PingURL(testUrl, doneChan, pingChan)
 					totalTimes++
 				}
@@ -301,8 +290,6 @@ func main() {
 					}
 					break outer
 				}
-			default:
-				time.Sleep(1 * time.Millisecond)
 			}
 		}
 		fmt.Println()
