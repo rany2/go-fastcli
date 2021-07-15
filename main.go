@@ -45,6 +45,10 @@ var client = &http.Client{
 	Transport: tr,
 }
 
+func calculateSpeed(totalDl float64, startTime time.Time) float64 {
+	return float64(totalDl) / time.Now().Sub(startTime).Seconds() / 125000
+}
+
 // To announce the death of the goroutine
 func AnnounceDeath(done chan bool) {
 	done <- true
@@ -147,7 +151,7 @@ func DownloadFile(url string, done chan bool, timeout float64, speed chan uint) 
 	}
 }
 
-func UploadFile(url string, done chan bool, timeout float64, speed chan uint) {
+func UploadFile(url string, done chan bool, timeout float64, speed chan uint, uploadinit *int) {
 	// Send done to channel on death of function
 	defer AnnounceDeath(done)
 
@@ -176,6 +180,9 @@ func UploadFile(url string, done chan bool, timeout float64, speed chan uint) {
 
 	// Execute the request until we reach the timeout
 	for {
+		// So that initial byte doesn't count
+		*uploadinit--
+
 		// Reset the index back to 0
 		counter.ReadIndex = int64(0)
 		resp, err := client.Do(req)
@@ -184,22 +191,22 @@ func UploadFile(url string, done chan bool, timeout float64, speed chan uint) {
 		}
 		defer resp.Body.Close()
 	}
+
 }
 
 func main() {
-
 	latencyBool := flag.Bool("latency", false, "run latency test")
 	downloadBool := flag.Bool("download", false, "run download test")
 	uploadBool := flag.Bool("upload", false, "run upload test")
 
-	ipv4Bool := flag.Bool("ipv4", false, "use ipv4")
-	ipv6Bool := flag.Bool("ipv6", false, "use ipv6")
+	ipv4Bool := flag.Bool("ipv4", false, "force use ipv4")
+	ipv6Bool := flag.Bool("ipv6", false, "force use ipv6")
 
 	pingTimes := flag.Int("ping-times", 1, "for latency test ping url n times")
 	downTimes := flag.Int("download-test-per-url", 8, "run download test n times per url in parallel")
-	uploadTimes := flag.Int("upload-test-per-url", 1, "run upload test n times per url in parallel")
+	uploadTimes := flag.Int("upload-test-per-url", 8, "run upload test n times per url in parallel")
 
-	maxTimeInTest := flag.Float64("test-time", 10, "time for each test")
+	maxTimeInTest := flag.Float64("test-time", 30, "time for each test")
 
 	urlsToTest := flag.Int("url-to-test", 5, "number of urls to request from api")
 
@@ -287,6 +294,8 @@ func main() {
 	for _, test := range testsToRun {
 		// if totalTimes == 0, all goroutines are done
 		totalTimes := 0
+		// if totalTimes > uploadInitialSent, we shouldn't count and only increment
+		uploadInitialSent := 0
 
 		for _, i := range m["targets"].([]interface{}) {
 			if test == "latency" {
@@ -306,7 +315,7 @@ func main() {
 
 				if test == "upload" {
 					for j := 0; j < *uploadTimes; j++ {
-						go UploadFile(testUrl, doneChan, *maxTimeInTest, currentSpeed)
+						go UploadFile(testUrl, doneChan, *maxTimeInTest, currentSpeed, &uploadInitialSent)
 						totalTimes++
 					}
 				}
@@ -322,13 +331,22 @@ func main() {
 		for {
 			select {
 			case c := <-currentSpeed:
-				totalDl += c
-				speedMbps = float64(totalDl) / time.Now().Sub(startTime).Seconds() / 125000
-				if term.IsTerminal(syscall.Stdout) {
-					if test == "download" {
+				if test == "download" {
+					totalDl += c
+					speedMbps = calculateSpeed(float64(totalDl), startTime)
+					if term.IsTerminal(syscall.Stdout) {
 						fmt.Printf("\r\033[KDownload   %0.3f Mbps", speedMbps)
+					}
+				} else {
+					// Don't count the first packets uploaded
+					if uploadInitialSent > totalTimes {
+						totalDl += c
+						speedMbps = calculateSpeed(float64(totalDl), startTime)
+						if term.IsTerminal(syscall.Stdout) {
+							fmt.Printf("\r\033[KUpload     %0.3f Mbps", speedMbps)
+						}
 					} else {
-						fmt.Printf("\r\033[KUpload     %0.3f Mbps", speedMbps)
+						uploadInitialSent++
 					}
 				}
 			case c := <-pingChan:
