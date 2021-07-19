@@ -25,7 +25,7 @@ const FastApiToken = "YXNkZmFzZGxmbnNkYWZoYXNkZmhrYWxm"
 
 // Create HTTP transports to share pool of connections while disabling compression
 var tr = &http.Transport{
-	Proxy: http.ProxyFromEnvironment,
+	Proxy: nil, //http.ProxyFromEnvironment,
 	DialContext: (&net.Dialer{
 		Timeout:   30 * time.Second,
 		KeepAlive: 30 * time.Second,
@@ -73,7 +73,7 @@ func PingURL(url string, done chan bool, result chan float64) {
 	}
 
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
-	_, err := http.DefaultTransport.RoundTrip(req)
+	_, err := tr.RoundTrip(req)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -246,6 +246,7 @@ func main() {
 	tr.DialContext = dialContext
 	api_tr := http.DefaultTransport.(*http.Transport).Clone()
 	api_tr.DialContext = dialContext
+	api_tr.Proxy = nil
 	http.DefaultClient.Transport = api_tr
 
 	resp, err := http.Get("https://api.fast.com/netflix/speedtest/v2?https=true&token=" + FastApiToken + "&urlCount=" + strconv.Itoa(*urlsToTest))
