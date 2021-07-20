@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"golang.org/x/term"
 	"io"
 	"io/ioutil"
 	"log"
@@ -17,6 +16,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/term"
 )
 
 // Fast Specific Values
@@ -46,7 +47,7 @@ var client = &http.Client{
 }
 
 func calculateSpeed(totalDl float64, startTime time.Time) float64 {
-	return float64(totalDl) / time.Now().Sub(startTime).Seconds() / 125000
+	return float64(totalDl) / time.Since(startTime).Seconds() / 125000
 }
 
 // To announce the death of the goroutine
@@ -256,7 +257,7 @@ func main() {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Fatal("API returned %d. Expected 200.", resp.StatusCode)
+		log.Fatalf("API returned %d. Expected 200.", resp.StatusCode)
 	}
 
 	bodyBytes, err := ioutil.ReadAll(resp.Body)
