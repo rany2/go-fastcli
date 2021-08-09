@@ -203,13 +203,14 @@ func main() {
 	ipv4Bool := flag.Bool("ipv4", false, "force use ipv4")
 	ipv6Bool := flag.Bool("ipv6", false, "force use ipv6")
 
-	pingTimes := flag.Int("ping-times", 1, "for latency test ping url n times")
+	pingTimes := flag.Int("ping-times", 2, "for latency test ping url n times")
 	downTimes := flag.Int("download-test-per-url", 8, "run download test n times per url in parallel")
 	uploadTimes := flag.Int("upload-test-per-url", 8, "run upload test n times per url in parallel")
 
-	maxTimeInTest := flag.Float64("test-time", 30, "time for each test")
+	maxTimeInDownloadTest := flag.Float64("download-test-time", 10, "time for download test")
+	maxTimeInUploadTest := flag.Float64("upload-test-time", 10, "time for upload test")
 
-	urlsToTest := flag.Int("url-to-test", 5, "number of urls to request from api")
+	urlsToTest := flag.Int("urls-to-test", 5, "number of urls to request from api")
 
 	flag.Parse()
 
@@ -310,14 +311,14 @@ func main() {
 				var testUrl = FormatFastURL(i.(map[string]interface{})["url"].(string), FastMaxPayload)
 				if test == "download" {
 					for j := 0; j < *downTimes; j++ {
-						go DownloadFile(testUrl, doneChan, *maxTimeInTest, currentSpeed)
+						go DownloadFile(testUrl, doneChan, *maxTimeInDownloadTest, currentSpeed)
 						totalTimes++
 					}
 				}
 
 				if test == "upload" {
 					for j := 0; j < *uploadTimes; j++ {
-						go UploadFile(testUrl, doneChan, *maxTimeInTest, currentSpeed, &uploadInitialSent)
+						go UploadFile(testUrl, doneChan, *maxTimeInUploadTest, currentSpeed, &uploadInitialSent)
 						totalTimes++
 					}
 				}
