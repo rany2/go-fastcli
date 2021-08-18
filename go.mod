@@ -3,6 +3,8 @@ module github.com/rany2/go-fastcli
 go 1.16
 
 require (
-	golang.org/x/sys v0.0.0-20210615035016-665e8c7367d1 // indirect
-	golang.org/x/term v0.0.0-20201126162022-7de9c90e9dd1
+	golang.org/x/lint v0.0.0-20210508222113-6edffad5e616 // indirect
+	golang.org/x/sys v0.0.0-20210809222454-d867a43fc93e // indirect
+	golang.org/x/term v0.0.0-20210615171337-6886f2dfbf5b
+	golang.org/x/tools v0.1.5 // indirect
 )

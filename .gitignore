@@ -1,4 +1,5 @@
 go-fastcli
+vendor
+vendor/**
 !cmd/**
-!vendor/**
 !pkg/**

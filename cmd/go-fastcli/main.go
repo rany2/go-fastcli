@@ -20,9 +20,11 @@ import (
 	"golang.org/x/term"
 )
 
-// Fast Specific Values
+// FastMaxPayload contains the download and upload max payload size
 const FastMaxPayload = 26214400
-const FastApiToken = "YXNkZmFzZGxmbnNkYWZoYXNkZmhrYWxm"
+
+// FastAPIToken contains the API key extracted from app-[0-9]+.js
+const FastAPIToken = "YXNkZmFzZGxmbnNkYWZoYXNkZmhrYWxm"
 
 // Create HTTP transports to share pool of connections while disabling compression
 var tr = &http.Transport{
@@ -50,16 +52,16 @@ func calculateSpeed(totalDl float64, startTime time.Time) float64 {
 	return float64(totalDl) / time.Since(startTime).Seconds() / 125000
 }
 
-// To announce the death of the goroutine
+// AnnounceDeath is used to announce the death of the goroutine
 func AnnounceDeath(done chan bool) {
 	done <- true
 }
 
-func FormatFastURL(url string, rangeEnd int) string {
+func formatFastURL(url string, rangeEnd int) string {
 	return strings.Replace(url, "/speedtest?", "/speedtest/range/0-"+strconv.Itoa(rangeEnd)+"?", -1)
 }
 
-func PingURL(url string, done chan bool, result chan float64) {
+func pingURL(url string, done chan bool, result chan float64) {
 	defer AnnounceDeath(done)
 
 	req, _ := http.NewRequest("GET", url, nil)
@@ -89,7 +91,7 @@ type BytesCounter struct {
 	MaxIndex     int64
 }
 
-func NewCounter() *BytesCounter {
+func newCounter() *BytesCounter {
 	return &BytesCounter{}
 }
 
@@ -117,7 +119,7 @@ func (c *BytesCounter) Write(p []byte) (n int, err error) {
 	return
 }
 
-func DownloadFile(url string, done chan bool, timeout float64, speed chan uint) {
+func downloadFile(url string, done chan bool, timeout float64, speed chan uint) {
 	// Send done to channel on death of function
 	defer AnnounceDeath(done)
 
@@ -129,7 +131,7 @@ func DownloadFile(url string, done chan bool, timeout float64, speed chan uint) 
 	defer cancel()
 
 	// Create counter to measure download speed
-	counter := NewCounter()
+	counter := newCounter()
 	counter.SpeedChannel = speed
 
 	// Make new request to download URL
@@ -152,7 +154,7 @@ func DownloadFile(url string, done chan bool, timeout float64, speed chan uint) 
 	}
 }
 
-func UploadFile(url string, done chan bool, timeout float64, speed chan uint, uploadinit *int) {
+func uploadFile(url string, done chan bool, timeout float64, speed chan uint, uploadinit *int) {
 	// Send done to channel on death of function
 	defer AnnounceDeath(done)
 
@@ -164,7 +166,7 @@ func UploadFile(url string, done chan bool, timeout float64, speed chan uint, up
 	defer cancel()
 
 	// Create counter to measure upload speed
-	counter := NewCounter()
+	counter := newCounter()
 	counter.SpeedChannel = speed
 	counter.MaxIndex = int64(FastMaxPayload)
 
@@ -246,12 +248,12 @@ func main() {
 		dialContext = defaultDialer.DialContext
 	}
 	tr.DialContext = dialContext
-	api_tr := http.DefaultTransport.(*http.Transport).Clone()
-	api_tr.DialContext = dialContext
-	api_tr.Proxy = nil
-	http.DefaultClient.Transport = api_tr
+	apiTr := http.DefaultTransport.(*http.Transport).Clone()
+	apiTr.DialContext = dialContext
+	apiTr.Proxy = nil
+	http.DefaultClient.Transport = apiTr
 
-	resp, err := http.Get("https://api.fast.com/netflix/speedtest/v2?https=true&token=" + FastApiToken + "&urlCount=" + strconv.Itoa(*urlsToTest))
+	resp, err := http.Get("https://api.fast.com/netflix/speedtest/v2?https=true&token=" + FastAPIToken + "&urlCount=" + strconv.Itoa(*urlsToTest))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -302,23 +304,23 @@ func main() {
 
 		for _, i := range m["targets"].([]interface{}) {
 			if test == "latency" {
-				var testUrl = FormatFastURL(i.(map[string]interface{})["url"].(string), 0)
+				var testURL = formatFastURL(i.(map[string]interface{})["url"].(string), 0)
 				for j := 0; j < *pingTimes; j++ {
-					go PingURL(testUrl, doneChan, pingChan)
+					go pingURL(testURL, doneChan, pingChan)
 					totalTimes++
 				}
 			} else {
-				var testUrl = FormatFastURL(i.(map[string]interface{})["url"].(string), FastMaxPayload)
+				var testURL = formatFastURL(i.(map[string]interface{})["url"].(string), FastMaxPayload)
 				if test == "download" {
 					for j := 0; j < *downTimes; j++ {
-						go DownloadFile(testUrl, doneChan, *maxTimeInDownloadTest, currentSpeed)
+						go downloadFile(testURL, doneChan, *maxTimeInDownloadTest, currentSpeed)
 						totalTimes++
 					}
 				}
 
 				if test == "upload" {
 					for j := 0; j < *uploadTimes; j++ {
-						go UploadFile(testUrl, doneChan, *maxTimeInUploadTest, currentSpeed, &uploadInitialSent)
+						go uploadFile(testURL, doneChan, *maxTimeInUploadTest, currentSpeed, &uploadInitialSent)
 						totalTimes++
 					}
 				}
