@@ -1,70 +1,121 @@
 package main
 
 import (
-	"context"
+	"crypto/tls"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
-	"net"
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
-
-	"golang.org/x/term"
 )
 
-// FastMaxPayload contains the download and upload max payload size
 const FastMaxPayload = 26214400
-
-// FastAPIToken contains the API key extracted from app-[0-9]+.js
 const FastAPIToken = "YXNkZmFzZGxmbnNkYWZoYXNkZmhrYWxm"
+const FastAPIURL = "https://api.fast.com/netflix/speedtest/v2?https=true&token=" + FastAPIToken
 
-// Create HTTP transports to share pool of connections while disabling compression
 var tr = &http.Transport{
-	Proxy: nil, //http.ProxyFromEnvironment,
-	DialContext: (&net.Dialer{
-		Timeout:   30 * time.Second,
-		KeepAlive: 30 * time.Second,
-	}).DialContext,
-	ForceAttemptHTTP2:     true,
-	IdleConnTimeout:       90 * time.Second,
-	TLSHandshakeTimeout:   10 * time.Second,
-	ExpectContinueTimeout: 1 * time.Second,
-	DisableCompression:    true,
-	MaxIdleConns:          0,
-	MaxIdleConnsPerHost:   0,
-	MaxConnsPerHost:       0,
-	WriteBufferSize:       0,
-	ReadBufferSize:        0,
-}
-var client = &http.Client{
-	Transport: tr,
+	TLSClientConfig:    &tls.Config{InsecureSkipVerify: true},
+	DisableCompression: true,
+	Proxy:              nil,
 }
 
-func calculateSpeed(totalDl float64, startTime time.Time) float64 {
-	return float64(totalDl) / time.Since(startTime).Seconds() / 125000
+var client = &http.Client{Transport: tr}
+
+type LocationInfo struct {
+	City    string
+	Country string
 }
 
-// AnnounceDeath is used to announce the death of the goroutine
-func AnnounceDeath(done chan bool) {
-	done <- true
+type ConnectionInfo struct {
+	ASN      string
+	IP       string
+	Location LocationInfo
 }
 
-func formatFastURL(url string, rangeEnd int) string {
+type FastServer struct {
+	City    string
+	Country string
+	URL     string
+}
+
+type FakeReader struct {
+	ReadIndex int64
+	MaxIndex  int64
+}
+
+func (c *FakeReader) Read(p []byte) (int, error) {
+	if c.ReadIndex >= c.MaxIndex {
+		return 0, io.EOF
+	}
+	for i := range p {
+		p[i] = 0
+	}
+	n := len(p)
+	c.ReadIndex += int64(n)
+	return n, nil
+}
+
+func FormatFastURL(url string, rangeEnd int) string {
 	return strings.Replace(url, "/speedtest?", "/speedtest/range/0-"+strconv.Itoa(rangeEnd)+"?", -1)
 }
 
-func pingURL(url string, done chan bool, result chan float64) {
-	defer AnnounceDeath(done)
+func FastGetServerList(urlsToTest int) (ConnectionInfo, []FastServer) {
+	resp, err := client.Get(FastAPIURL + "&urlCount=" + strconv.Itoa(urlsToTest))
+	if err != nil {
+		panic("Error getting server list")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		panic("Fast.com API returned " + resp.Status)
+	}
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		panic("Error reading server list")
+	}
+	var jsonData map[string]interface{}
+	if err := json.Unmarshal(body, &jsonData); err != nil {
+		panic("Error parsing server list")
+	}
+	var connectionInfo ConnectionInfo
+	var locationInfo LocationInfo
+	var fastServer FastServer
+	var fastServerList []FastServer
+	var serverList = jsonData["targets"].([]interface{})
+	for _, server := range serverList {
+		serverData := server.(map[string]interface{})
+		fastServer = FastServer{
+			City:    serverData["location"].(map[string]interface{})["city"].(string),
+			Country: serverData["location"].(map[string]interface{})["country"].(string),
+			URL:     serverData["url"].(string),
+		}
+		fastServerList = append(fastServerList, fastServer)
+	}
+	connectionInfo.IP = jsonData["client"].(map[string]interface{})["ip"].(string)
+	connectionInfo.ASN = jsonData["client"].(map[string]interface{})["asn"].(string)
+	locationInfo.City = jsonData["client"].(map[string]interface{})["location"].(map[string]interface{})["city"].(string)
+	locationInfo.Country = jsonData["client"].(map[string]interface{})["location"].(map[string]interface{})["country"].(string)
+	connectionInfo.Location = locationInfo
+	return connectionInfo, fastServerList
+}
 
-	req, _ := http.NewRequest("GET", url, nil)
+func GetHost(_url string) string {
+	u, err := url.Parse(_url)
+	if err != nil {
+		panic("Error parsing URL")
+	}
+	return u.Host
+}
+
+func GetLatency(url string) time.Duration {
+	req, err := http.NewRequest("HEAD", url, nil)
+	if err != nil {
+		panic("Error creating request")
+	}
 	var t1, t2 time.Time
 	trace := &httptrace.ClientTrace{
 		ConnectStart: func(_, _ string) {
@@ -74,310 +125,90 @@ func pingURL(url string, done chan bool, result chan float64) {
 			t2 = time.Now()
 		},
 	}
-
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
-	_, err := tr.RoundTrip(req)
+	_, err = tr.RoundTrip(req)
 	if err != nil {
-		log.Fatal(err)
+		panic("Error making request")
 	}
-
-	result <- float64(time.Duration(t2.Sub(t1))) / 1000000
+	return t2.Sub(t1)
 }
 
-// BytesCounter implements io.Reader interface, for counting bytes being written in HTTP requests
-type BytesCounter struct {
-	SpeedChannel chan uint
-	ReadIndex    int64
-	MaxIndex     int64
-}
-
-func newCounter() *BytesCounter {
-	return &BytesCounter{}
-}
-
-// Read implements io.Reader for Upload tests
-func (c *BytesCounter) Read(p []byte) (n int, err error) {
-	if c.ReadIndex >= c.MaxIndex {
-		err = io.EOF
-		return
-	}
-
-	for i := range p {
-		p[i] = 'a'
-	}
-	n = len(p)
-
-	c.ReadIndex += int64(n)
-	c.SpeedChannel <- uint(n)
-	return
-}
-
-// Write implements io.Writer for Download tests
-func (c *BytesCounter) Write(p []byte) (n int, err error) {
-	n = len(p)
-	c.SpeedChannel <- uint(len(p))
-	return
-}
-
-func downloadFile(url string, done chan bool, timeout float64, speed chan uint) {
-	// Send done to channel on death of function
-	defer AnnounceDeath(done)
-
-	// Create context with time limit
-	ctx := context.Background()
-	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
-
-	// Make sure operation is cancelled on exit
-	defer cancel()
-
-	// Create counter to measure download speed
-	counter := newCounter()
-	counter.SpeedChannel = speed
-
-	// Make new request to download URL
-	req, err := http.NewRequest("GET", url, nil)
+func GetDownloadSpeed(url string) float64 {
+	resp, err := client.Get(FormatFastURL(url, FastMaxPayload))
 	if err != nil {
-		log.Fatal(err)
+		panic("Error getting download speed")
 	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		panic("Fast.com API returned " + resp.Status)
+	}
+	t1 := time.Now()
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		panic("Error reading download speed")
+	}
+	return float64(FastMaxPayload) / time.Since(t1).Seconds()
+}
+
+func GetUploadSpeed(url string) float64 {
+	counter := &FakeReader{
+		ReadIndex: 0,
+		MaxIndex:  FastMaxPayload,
+	}
+	req, err := http.NewRequest("POST", FormatFastURL(url, FastMaxPayload), counter)
+	if err != nil {
+		panic("Error creating request")
+	}
+	req.ContentLength = FastMaxPayload
+	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("Accept-Encoding", "identity")
-	// Associate the cancellable context we just created to the request
-	req = req.WithContext(ctx)
 
-	// Execute the request until we reach the timeout
-	for {
-		resp, err := client.Do(req)
-		if err != nil {
-			return
-		}
-		defer resp.Body.Close()
-		io.Copy(counter, resp.Body)
-	}
-}
-
-func uploadFile(url string, done chan bool, timeout float64, speed chan uint, uploadinit *int) {
-	// Send done to channel on death of function
-	defer AnnounceDeath(done)
-
-	// Create context with time limit
-	ctx := context.Background()
-	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
-
-	// Make sure operation is cancelled on exit
-	defer cancel()
-
-	// Create counter to measure upload speed
-	counter := newCounter()
-	counter.SpeedChannel = speed
-	counter.MaxIndex = int64(FastMaxPayload)
-
-	// Make new request to download URL
-	req, err := http.NewRequest("POST", url, counter)
-	req.ContentLength = int64(FastMaxPayload)
-	req.Header.Set("Accept-Encoding", "identity")
-	req.Header.Set("Content-type", "application/octet-stream")
+	t1 := time.Now()
+	resp, err := client.Do(req)
 	if err != nil {
-		log.Fatal(err)
+		panic("Error doing request")
 	}
-	// Associate the cancellable context we just created to the request
-	req = req.WithContext(ctx)
-
-	// Execute the request until we reach the timeout
-	for {
-		// So that initial byte doesn't count
-		*uploadinit--
-
-		// Reset the index back to 0
-		counter.ReadIndex = int64(0)
-		resp, err := client.Do(req)
-		if err != nil {
-			return
-		}
-		defer resp.Body.Close()
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		panic("Fast.com API returned " + resp.Status)
 	}
-
+	return float64(FastMaxPayload) / time.Since(t1).Seconds()
 }
 
 func main() {
-	latencyBool := flag.Bool("latency", false, "run latency test")
-	downloadBool := flag.Bool("download", false, "run download test")
-	uploadBool := flag.Bool("upload", false, "run upload test")
-
-	ipv4Bool := flag.Bool("ipv4", false, "force use ipv4")
-	ipv6Bool := flag.Bool("ipv6", false, "force use ipv6")
-
-	pingTimes := flag.Int("ping-times", 2, "for latency test ping url n times")
-	downTimes := flag.Int("download-test-per-url", 8, "run download test n times per url in parallel")
-	uploadTimes := flag.Int("upload-test-per-url", 8, "run upload test n times per url in parallel")
-
-	maxTimeInDownloadTest := flag.Float64("download-test-time", 10, "time for download test")
-	maxTimeInUploadTest := flag.Float64("upload-test-time", 10, "time for upload test")
-
-	urlsToTest := flag.Int("urls-to-test", 5, "number of urls to request from api")
-
-	flag.Parse()
-
-	testsToRun := []string{}
-	if !*downloadBool && !*uploadBool && !*latencyBool {
-		*downloadBool = true
-		*uploadBool = true
-		*latencyBool = true
-	}
-	if *latencyBool {
-		testsToRun = append(testsToRun, "latency")
-	}
-	if *downloadBool {
-		testsToRun = append(testsToRun, "download")
-	}
-	if *uploadBool {
-		testsToRun = append(testsToRun, "upload")
+	connectionInfo, fastServerList := FastGetServerList(1)
+	fmt.Println("Fast.com Speedtest")
+	fmt.Println()
+	fmt.Println("Connection Info:")
+	fmt.Println("  IP: " + connectionInfo.IP)
+	fmt.Println("  ASN: " + connectionInfo.ASN)
+	fmt.Println("  Location: " + connectionInfo.Location.City + ", " + connectionInfo.Location.Country)
+	fmt.Println()
+	fmt.Println("Fast.com Servers:")
+	for _, server := range fastServerList {
+		fmt.Println("  Location: " + server.City + ", " + server.Country)
+		fmt.Println("  URL: " + server.URL)
+		fmt.Println()
 	}
 
-	var dialContext func(ctx context.Context, network, addr string) (net.Conn, error)
-	defaultDialer := http.DefaultTransport.(*http.Transport).Clone()
-	if *ipv4Bool && *ipv6Bool {
-		log.Fatal("-ipv4 and -ipv6 are mutually exclusive")
-	} else if *ipv4Bool {
-		dialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-			return defaultDialer.DialContext(ctx, "tcp4", address)
-		}
-	} else if *ipv6Bool {
-		dialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-			return defaultDialer.DialContext(ctx, "tcp6", address)
-		}
-	} else {
-		dialContext = defaultDialer.DialContext
+	fmt.Println("Latency:")
+	for _, server := range fastServerList {
+		latency := GetLatency(server.URL)
+		fmt.Printf("  %s: %dms\n", GetHost(server.URL), latency.Milliseconds())
 	}
-	tr.DialContext = dialContext
-	apiTr := http.DefaultTransport.(*http.Transport).Clone()
-	apiTr.DialContext = dialContext
-	apiTr.Proxy = nil
-	http.DefaultClient.Transport = apiTr
-
-	resp, err := http.Get("https://api.fast.com/netflix/speedtest/v2?https=true&token=" + FastAPIToken + "&urlCount=" + strconv.Itoa(*urlsToTest))
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		log.Fatalf("API returned %d. Expected 200.", resp.StatusCode)
-	}
-
-	bodyBytes, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	var m map[string]interface{}
-	if err := json.Unmarshal(bodyBytes, &m); err != nil {
-		log.Fatal(err)
-	}
-
-	fmt.Printf("Testing from %s, AS%s, %s, %s\n",
-		m["client"].(map[string]interface{})["ip"],
-		m["client"].(map[string]interface{})["asn"],
-		m["client"].(map[string]interface{})["location"].(map[string]interface{})["city"],
-		m["client"].(map[string]interface{})["location"].(map[string]interface{})["country"])
-
-	fmt.Printf("Testing to %d servers:\n", len(m["targets"].([]interface{})))
-	for d, i := range m["targets"].([]interface{}) {
-		u, err := url.Parse(i.(map[string]interface{})["url"].(string))
-		if err != nil {
-			log.Fatal(err)
-		}
-		fmt.Printf("  %d) %s, %s, %s\n", d+1,
-			u.Host,
-			i.(map[string]interface{})["location"].(map[string]interface{})["city"],
-			i.(map[string]interface{})["location"].(map[string]interface{})["country"])
-	}
-
 	fmt.Println()
 
-	currentSpeed := make(chan uint, 1)
-	doneChan := make(chan bool, 1)
-	pingChan := make(chan float64, 1)
-	for _, test := range testsToRun {
-		// if totalTimes == 0, all goroutines are done
-		totalTimes := 0
-		// if totalTimes > uploadInitialSent, we shouldn't count and only increment
-		uploadInitialSent := 0
+	fmt.Println("Download Speed:")
+	for _, server := range fastServerList {
+		downloadSpeed := GetDownloadSpeed(server.URL)
+		//fmt.Printf("  %s: %0.3fMB/s\n", GetHost(server.URL), downloadSpeed/1024/1024)
+		fmt.Printf("  %s: %0.3fMbit/s\n", GetHost(server.URL), downloadSpeed/125000)
+	}
+	fmt.Println()
 
-		for _, i := range m["targets"].([]interface{}) {
-			if test == "latency" {
-				var testURL = formatFastURL(i.(map[string]interface{})["url"].(string), 0)
-				for j := 0; j < *pingTimes; j++ {
-					go pingURL(testURL, doneChan, pingChan)
-					totalTimes++
-				}
-			} else {
-				var testURL = formatFastURL(i.(map[string]interface{})["url"].(string), FastMaxPayload)
-				if test == "download" {
-					for j := 0; j < *downTimes; j++ {
-						go downloadFile(testURL, doneChan, *maxTimeInDownloadTest, currentSpeed)
-						totalTimes++
-					}
-				}
-
-				if test == "upload" {
-					for j := 0; j < *uploadTimes; j++ {
-						go uploadFile(testURL, doneChan, *maxTimeInUploadTest, currentSpeed, &uploadInitialSent)
-						totalTimes++
-					}
-				}
-			}
-		}
-
-		var startTime = time.Now()
-		var totalDl = uint(0)
-		var totalPing []float64
-		var speedMbps = float64(0)
-
-	outer:
-		for {
-			select {
-			case c := <-currentSpeed:
-				if test == "download" {
-					totalDl += c
-					speedMbps = calculateSpeed(float64(totalDl), startTime)
-					if term.IsTerminal(syscall.Stdout) {
-						fmt.Printf("\r\033[KDownload   %0.3f Mbps", speedMbps)
-					}
-				} else {
-					// Don't count the first packets uploaded
-					if uploadInitialSent > totalTimes {
-						totalDl += c
-						speedMbps = calculateSpeed(float64(totalDl), startTime)
-						if term.IsTerminal(syscall.Stdout) {
-							fmt.Printf("\r\033[KUpload     %0.3f Mbps", speedMbps)
-						}
-					} else {
-						uploadInitialSent++
-					}
-				}
-			case c := <-pingChan:
-				totalPing = append(totalPing, c)
-			case <-doneChan:
-				totalTimes--
-				if totalTimes == 0 {
-					if test == "latency" {
-						var m = float64(0)
-						for i, e := range totalPing {
-							if i == 0 || e < m {
-								m = e
-							}
-						}
-						fmt.Printf("Ping       %0.3f ms", m)
-					} else if !term.IsTerminal(syscall.Stdout) {
-						if test == "download" {
-							fmt.Printf("Download   %0.3f Mbps", speedMbps)
-						} else if test == "upload" {
-							fmt.Printf("Upload     %0.3f Mbps", speedMbps)
-						}
-					}
-					break outer
-				}
-			}
-		}
-		fmt.Println()
+	fmt.Println("Upload Speed:")
+	for _, server := range fastServerList {
+		uploadSpeed := GetUploadSpeed(server.URL)
+		//fmt.Printf("  %s: %0.3fMB/s\n", GetHost(server.URL), uploadSpeed/1024/1024)
+		fmt.Printf("  %s: %0.3fMbit/s\n", GetHost(server.URL), uploadSpeed/125000)
 	}
 }
