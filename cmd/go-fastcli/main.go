@@ -1,15 +1,14 @@
 package main
 
 import (
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"io/ioutil"
+	"math"
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -19,9 +18,10 @@ const FastAPIToken = "YXNkZmFzZGxmbnNkYWZoYXNkZmhrYWxm"
 const FastAPIURL = "https://api.fast.com/netflix/speedtest/v2?https=true&token=" + FastAPIToken
 
 var tr = &http.Transport{
-	TLSClientConfig:    &tls.Config{InsecureSkipVerify: true},
-	DisableCompression: true,
-	Proxy:              nil,
+	DisableCompression:  true,
+	Proxy:               nil,
+	DisableKeepAlives:   false,
+	MaxIdleConnsPerHost: 1024,
 }
 
 var client = &http.Client{Transport: tr}
@@ -60,12 +60,51 @@ func (c *FakeReader) Read(p []byte) (int, error) {
 	return n, nil
 }
 
+func Mean(nums []float64) float64 {
+	var total float64
+	for _, num := range nums {
+		total += num
+	}
+	return total / float64(len(nums))
+}
+
+func StdDeviation(nums []float64) float64 {
+	mean := Mean(nums)
+	var total float64
+	for _, num := range nums {
+		total += math.Pow(num-mean, 2)
+	}
+	return math.Sqrt(total / float64(len(nums)))
+}
+
+func StdDeviationLastN(nums []float64, n int) float64 {
+	if len(nums) < n {
+		panic("Not enough numbers to calculate std deviation")
+	} else if n <= 0 {
+		panic("n must be greater than 0")
+	} else if n > len(nums) {
+		panic("n must be less than or equal to the number of numbers")
+	} else {
+		return StdDeviation(nums[len(nums)-n:])
+	}
+}
+
+func GetMaxValue(nums []float64) float64 {
+	var max float64
+	for _, num := range nums {
+		if num > max {
+			max = num
+		}
+	}
+	return max
+}
+
 func FormatFastURL(url string, rangeEnd int) string {
-	return strings.Replace(url, "/speedtest?", "/speedtest/range/0-"+strconv.Itoa(rangeEnd)+"?", -1)
+	return strings.Replace(url, "/speedtest?", fmt.Sprintf("/speedtest/range/0-%d?", rangeEnd), -1)
 }
 
 func FastGetServerList(urlsToTest int) (ConnectionInfo, []FastServer) {
-	resp, err := client.Get(FastAPIURL + "&urlCount=" + strconv.Itoa(urlsToTest))
+	resp, err := client.Get(FastAPIURL + fmt.Sprintf("&urlCount=%d", urlsToTest))
 	if err != nil {
 		panic("Error getting server list")
 	}
@@ -112,7 +151,7 @@ func GetHost(_url string) string {
 }
 
 func GetLatency(url string) time.Duration {
-	req, err := http.NewRequest("HEAD", url, nil)
+	req, err := http.NewRequest("HEAD", FormatFastURL(url, 0), nil)
 	if err != nil {
 		panic("Error creating request")
 	}
@@ -133,8 +172,8 @@ func GetLatency(url string) time.Duration {
 	return t2.Sub(t1)
 }
 
-func GetDownloadSpeed(url string) float64 {
-	resp, err := client.Get(FormatFastURL(url, FastMaxPayload))
+func GetDownloadSpeed(url string, playloadSize int) float64 {
+	resp, err := client.Get(FormatFastURL(url, playloadSize))
 	if err != nil {
 		panic("Error getting download speed")
 	}
@@ -146,19 +185,19 @@ func GetDownloadSpeed(url string) float64 {
 	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
 		panic("Error reading download speed")
 	}
-	return float64(FastMaxPayload) / time.Since(t1).Seconds()
+	return float64(playloadSize) / time.Since(t1).Seconds()
 }
 
-func GetUploadSpeed(url string) float64 {
+func GetUploadSpeed(url string, playload_size int) float64 {
 	counter := &FakeReader{
 		ReadIndex: 0,
-		MaxIndex:  FastMaxPayload,
+		MaxIndex:  int64(playload_size),
 	}
-	req, err := http.NewRequest("POST", FormatFastURL(url, FastMaxPayload), counter)
+	req, err := http.NewRequest("POST", FormatFastURL(url, playload_size), counter)
 	if err != nil {
 		panic("Error creating request")
 	}
-	req.ContentLength = FastMaxPayload
+	req.ContentLength = int64(playload_size)
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("Accept-Encoding", "identity")
 
@@ -171,11 +210,23 @@ func GetUploadSpeed(url string) float64 {
 	if resp.StatusCode != http.StatusOK {
 		panic("Fast.com API returned " + resp.Status)
 	}
-	return float64(FastMaxPayload) / time.Since(t1).Seconds()
+	return float64(int64(playload_size)) / time.Since(t1).Seconds()
 }
 
 func main() {
-	connectionInfo, fastServerList := FastGetServerList(1)
+	serverNum := 1
+
+	downMaxLoop := 100
+	downMeasureMB := 1
+	downStdLastVars := 5
+	downStdMax := 0.9
+
+	upMaxLoop := 100
+	upMeasureMB := 1
+	upStdLastVars := 5
+	upStdMax := 0.9
+
+	connectionInfo, fastServerList := FastGetServerList(serverNum)
 	fmt.Println("Fast.com Speedtest")
 	fmt.Println()
 	fmt.Println("Connection Info:")
@@ -199,16 +250,34 @@ func main() {
 
 	fmt.Println("Download Speed:")
 	for _, server := range fastServerList {
-		downloadSpeed := GetDownloadSpeed(server.URL)
-		//fmt.Printf("  %s: %0.3fMB/s\n", GetHost(server.URL), downloadSpeed/1024/1024)
-		fmt.Printf("  %s: %0.3fMbit/s\n", GetHost(server.URL), downloadSpeed/125000)
+		var downloadSpeed float64
+		totalDownloads := []float64{}
+		for i := 0; i < downMaxLoop; i++ {
+			downloadSpeed = GetDownloadSpeed(server.URL, downMeasureMB*1024*1024)
+			totalDownloads = append(totalDownloads, downloadSpeed)
+			if len(totalDownloads) >= downStdLastVars && StdDeviationLastN(totalDownloads, downStdLastVars) < 1024*1024*downStdMax {
+				fmt.Println("HERE")
+				break
+			}
+		}
+		//fmt.Printf("  %s: %0.3fMB/s\n", GetHost(server.URL), GetMaxValue(totalDownloads)/1024/1024)
+		fmt.Printf("  %s: %0.3fMbit/s\n", GetHost(server.URL), GetMaxValue(totalDownloads)/125000)
 	}
 	fmt.Println()
 
 	fmt.Println("Upload Speed:")
 	for _, server := range fastServerList {
-		uploadSpeed := GetUploadSpeed(server.URL)
-		//fmt.Printf("  %s: %0.3fMB/s\n", GetHost(server.URL), uploadSpeed/1024/1024)
-		fmt.Printf("  %s: %0.3fMbit/s\n", GetHost(server.URL), uploadSpeed/125000)
+		var uploadSpeed float64
+		totalUploads := []float64{}
+		for i := 0; i < upMaxLoop; i++ {
+			uploadSpeed = GetUploadSpeed(server.URL, upMeasureMB*1024*1024)
+			totalUploads = append(totalUploads, uploadSpeed)
+			if len(totalUploads) >= upStdLastVars && StdDeviationLastN(totalUploads, upStdLastVars) < 1024*1024*upStdMax {
+				fmt.Println("HERE")
+				break
+			}
+		}
+		//fmt.Printf("  %s: %0.3fMB/s\n", GetHost(server.URL), GetMaxValue(totalUploads)/1024/1024)
+		fmt.Printf("  %s: %0.3fMbit/s\n", GetHost(server.URL), GetMaxValue(totalUploads)/125000)
 	}
 }
