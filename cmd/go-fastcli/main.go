@@ -60,7 +60,7 @@ func (c *FakeReader) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-func Mean(nums []float64) float64 {
+func CalcMean(nums []float64) float64 {
 	var total float64
 	for _, num := range nums {
 		total += num
@@ -68,8 +68,20 @@ func Mean(nums []float64) float64 {
 	return total / float64(len(nums))
 }
 
-func StdDeviation(nums []float64) float64 {
-	mean := Mean(nums)
+func CalcMeanOfLastN(nums []float64, n int) float64 {
+	if len(nums) < n {
+		panic("Not enough numbers to calculate mean")
+	} else if n <= 0 {
+		panic("n must be greater than 0")
+	} else if n > len(nums) {
+		panic("n must be less than or equal to the number of numbers")
+	} else {
+		return CalcMean(nums[len(nums)-n:])
+	}
+}
+
+func CalcStdDeviation(nums []float64) float64 {
+	mean := CalcMean(nums)
 	var total float64
 	for _, num := range nums {
 		total += math.Pow(num-mean, 2)
@@ -77,7 +89,7 @@ func StdDeviation(nums []float64) float64 {
 	return math.Sqrt(total / float64(len(nums)))
 }
 
-func StdDeviationLastN(nums []float64, n int) float64 {
+func CalcStdDeviationLastN(nums []float64, n int) float64 {
 	if len(nums) < n {
 		panic("Not enough numbers to calculate std deviation")
 	} else if n <= 0 {
@@ -85,11 +97,11 @@ func StdDeviationLastN(nums []float64, n int) float64 {
 	} else if n > len(nums) {
 		panic("n must be less than or equal to the number of numbers")
 	} else {
-		return StdDeviation(nums[len(nums)-n:])
+		return CalcStdDeviation(nums[len(nums)-n:])
 	}
 }
 
-func GetMaxValue(nums []float64) float64 {
+func CalcMaxValue(nums []float64) float64 {
 	var max float64
 	for _, num := range nums {
 		if num > max {
@@ -97,6 +109,30 @@ func GetMaxValue(nums []float64) float64 {
 		}
 	}
 	return max
+}
+
+func CalcMaxValueLastN(nums []float64, n int) float64 {
+	if len(nums) < n {
+		panic("Not enough numbers to calculate max value")
+	} else if n <= 0 {
+		panic("n must be greater than 0")
+	} else if n > len(nums) {
+		panic("n must be less than or equal to the number of numbers")
+	} else {
+		return CalcMaxValue(nums[len(nums)-n:])
+	}
+}
+
+func CalcJitter(nums []float64) float64 {
+	if len(nums) < 2 {
+		panic("Not enough numbers to calculate jitter")
+	} else {
+		diffs := float64(0)
+		for i := 1; i < len(nums); i++ {
+			diffs += math.Abs(nums[i] - nums[i-1])
+		}
+		return diffs / float64(len(nums)-1)
+	}
 }
 
 func FormatFastURL(url string, rangeEnd int) string {
@@ -214,70 +250,133 @@ func GetUploadSpeed(url string, playload_size int) float64 {
 }
 
 func main() {
+	// number of servers to request
 	serverNum := 1
 
-	downMaxLoop := 100
-	downMeasureMB := 1
-	downStdLastVars := 5
-	downStdMax := 0.9
+	// number of times to measure latency
+	latencyLoopNum := 10
 
-	upMaxLoop := 100
-	upMeasureMB := 1
-	upStdLastVars := 5
-	upStdMax := 0.9
+	// max loops to run
+	downMaxLoop := 100
+
+	// payload size
+	downMeasureSlowMB := 2  // for slow connections
+	downMeasureFastMB := 10 // for fast connections
+
+	// any value over this would be considered a fast connection
+	downMeasureCutoffMB := float64(downMeasureSlowMB)
+
+	// take last n values to calculate standard deviation
+	downStdLastVarsSlow := 3 // for slow connections
+	downStdLastVarsFast := 4 // for fast connections
+
+	// if standard deviation is less than this, we break out of the loop
+	downStdMaxSlow := 0.2 // for slow connections
+	downStdMaxFast := 5.0 // for fast connections
+
+	// same as above, but for upload
+	upMaxLoop := downMaxLoop
+	upMeasureSlowMB := downMeasureSlowMB
+	upMeasureFastMB := downMeasureFastMB
+	upMeasureCutoffMB := downMeasureCutoffMB
+	upStdLastVarsSlow := downStdLastVarsSlow
+	upStdLastVarsFast := downStdLastVarsFast
+	upStdMaxSlow := downStdMaxSlow
+	upStdMaxFast := downStdMaxFast
 
 	connectionInfo, fastServerList := FastGetServerList(serverNum)
 	fmt.Println("Fast.com Speedtest")
 	fmt.Println()
-	fmt.Println("Connection Info:")
-	fmt.Println("  IP: " + connectionInfo.IP)
-	fmt.Println("  ASN: " + connectionInfo.ASN)
-	fmt.Println("  Location: " + connectionInfo.Location.City + ", " + connectionInfo.Location.Country)
+	fmt.Printf("Connection Info:\n")
+	fmt.Printf("  - IP: %s\n", connectionInfo.IP)
+	fmt.Printf("  - ASN: %s\n", connectionInfo.ASN)
+	fmt.Printf("  - Location: %s, %s\n", connectionInfo.Location.City, connectionInfo.Location.Country)
 	fmt.Println()
 	fmt.Println("Fast.com Servers:")
 	for _, server := range fastServerList {
-		fmt.Println("  Location: " + server.City + ", " + server.Country)
-		fmt.Println("  URL: " + server.URL)
+		fmt.Printf("  - Location: %s, %s\n", server.City, server.Country)
+		fmt.Printf("    URL: %s\n", server.URL)
 		fmt.Println()
 	}
 
 	fmt.Println("Latency:")
 	for _, server := range fastServerList {
-		latency := GetLatency(server.URL)
-		fmt.Printf("  %s: %dms\n", GetHost(server.URL), latency.Milliseconds())
+		totalLatency := []time.Duration{}
+		for i := 0; i < latencyLoopNum; i++ {
+			totalLatency = append(totalLatency, GetLatency(server.URL))
+		}
+		fmt.Printf("  - %s: %0.3f ms (%0.3f ms jitter)\n",
+			GetHost(server.URL),
+			CalcMean(
+				func() []float64 {
+					var temp []float64
+					for i := 0; i < len(totalLatency); i++ {
+						temp = append(temp, float64(totalLatency[i].Nanoseconds()))
+					}
+					return temp
+				}(),
+			)*float64(time.Nanosecond)/float64(time.Millisecond),
+			CalcJitter(
+				func() []float64 {
+					var temp []float64
+					for i := 0; i < len(totalLatency); i++ {
+						temp = append(temp, float64(totalLatency[i].Nanoseconds()))
+					}
+					return temp
+				}(),
+			)*float64(time.Nanosecond)/float64(time.Millisecond),
+		)
 	}
 	fmt.Println()
 
 	fmt.Println("Download Speed:")
 	for _, server := range fastServerList {
-		var i int
-		var downloadSpeed float64
 		totalDownloads := []float64{}
-		for i = 0; i < downMaxLoop; i++ {
-			downloadSpeed = GetDownloadSpeed(server.URL, downMeasureMB*1024*1024)
+		downMeasureMB := downMeasureSlowMB
+		downStdLastVars := downStdLastVarsSlow
+		downStdMax := downStdMaxSlow
+		cutOffComplete := false
+		for i := 0; i < downMaxLoop; i++ {
+			downloadSpeed := GetDownloadSpeed(server.URL, downMeasureMB*1024*1024)
+			if !cutOffComplete && downloadSpeed > downMeasureCutoffMB*1024*1024 {
+				downMeasureMB = downMeasureFastMB
+				downStdLastVars = downStdLastVarsFast
+				downStdMax = downStdMaxFast
+				cutOffComplete = true
+				i-- // Retry this iteration
+				continue
+			}
 			totalDownloads = append(totalDownloads, downloadSpeed)
-			if len(totalDownloads) >= downStdLastVars && StdDeviationLastN(totalDownloads, downStdLastVars) < 1024*1024*downStdMax {
+			if len(totalDownloads) >= downStdLastVars && CalcStdDeviationLastN(totalDownloads, downStdLastVars) < 1024*1024*downStdMax {
 				break
 			}
 		}
-		//fmt.Printf("  %s: %0.3fMB/s\n", GetHost(server.URL), GetMaxValue(totalDownloads)/1024/1024)
-		fmt.Printf("  %s: %0.3fMbit/s (used %dMB)\n", GetHost(server.URL), GetMaxValue(totalDownloads)/125000, (i+1)*downMeasureMB)
+		fmt.Printf("  - %s: %0.3f Mbit/s (used %d MB)\n", GetHost(server.URL), CalcMaxValueLastN(totalDownloads, downStdLastVars)/125000, len(totalDownloads)*downMeasureMB)
 	}
 	fmt.Println()
 
 	fmt.Println("Upload Speed:")
 	for _, server := range fastServerList {
-		var i int
-		var uploadSpeed float64
 		totalUploads := []float64{}
-		for i = 0; i < upMaxLoop; i++ {
-			uploadSpeed = GetUploadSpeed(server.URL, upMeasureMB*1024*1024)
+		upMeasureMB := upMeasureSlowMB
+		upStdLastVars := upStdLastVarsSlow
+		upStdMax := upStdMaxSlow
+		cutOffComplete := false
+		for i := 0; i < upMaxLoop; i++ {
+			uploadSpeed := GetUploadSpeed(server.URL, upMeasureMB*1024*1024)
+			if !cutOffComplete && uploadSpeed > upMeasureCutoffMB*1024*1024 {
+				upMeasureMB = upMeasureFastMB
+				upStdLastVars = upStdLastVarsFast
+				upStdMax = upStdMaxFast
+				cutOffComplete = true
+				i-- // Retry this iteration
+				continue
+			}
 			totalUploads = append(totalUploads, uploadSpeed)
-			if len(totalUploads) >= upStdLastVars && StdDeviationLastN(totalUploads, upStdLastVars) < 1024*1024*upStdMax {
+			if len(totalUploads) >= upStdLastVars && CalcStdDeviationLastN(totalUploads, upStdLastVars) < 1024*1024*upStdMax {
 				break
 			}
 		}
-		//fmt.Printf("  %s: %0.3fMB/s\n", GetHost(server.URL), GetMaxValue(totalUploads)/1024/1024)
-		fmt.Printf("  %s: %0.3fMbit/s (used %dMB)\n", GetHost(server.URL), uploadSpeed/125000, (i+1)*upMeasureMB)
+		fmt.Printf("  - %s: %0.3f Mbit/s (used %d MB)\n", GetHost(server.URL), CalcMaxValueLastN(totalUploads, upStdLastVars)/125000, len(totalUploads)*upMeasureMB)
 	}
 }
