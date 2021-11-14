@@ -250,34 +250,34 @@ func main() {
 
 	fmt.Println("Download Speed:")
 	for _, server := range fastServerList {
+		var i int
 		var downloadSpeed float64
 		totalDownloads := []float64{}
-		for i := 0; i < downMaxLoop; i++ {
+		for i = 0; i < downMaxLoop; i++ {
 			downloadSpeed = GetDownloadSpeed(server.URL, downMeasureMB*1024*1024)
 			totalDownloads = append(totalDownloads, downloadSpeed)
 			if len(totalDownloads) >= downStdLastVars && StdDeviationLastN(totalDownloads, downStdLastVars) < 1024*1024*downStdMax {
-				fmt.Println("HERE")
 				break
 			}
 		}
 		//fmt.Printf("  %s: %0.3fMB/s\n", GetHost(server.URL), GetMaxValue(totalDownloads)/1024/1024)
-		fmt.Printf("  %s: %0.3fMbit/s\n", GetHost(server.URL), GetMaxValue(totalDownloads)/125000)
+		fmt.Printf("  %s: %0.3fMbit/s (used %dMB)\n", GetHost(server.URL), GetMaxValue(totalDownloads)/125000, (i+1)*downMeasureMB)
 	}
 	fmt.Println()
 
 	fmt.Println("Upload Speed:")
 	for _, server := range fastServerList {
+		var i int
 		var uploadSpeed float64
 		totalUploads := []float64{}
-		for i := 0; i < upMaxLoop; i++ {
+		for i = 0; i < upMaxLoop; i++ {
 			uploadSpeed = GetUploadSpeed(server.URL, upMeasureMB*1024*1024)
 			totalUploads = append(totalUploads, uploadSpeed)
 			if len(totalUploads) >= upStdLastVars && StdDeviationLastN(totalUploads, upStdLastVars) < 1024*1024*upStdMax {
-				fmt.Println("HERE")
 				break
 			}
 		}
 		//fmt.Printf("  %s: %0.3fMB/s\n", GetHost(server.URL), GetMaxValue(totalUploads)/1024/1024)
-		fmt.Printf("  %s: %0.3fMbit/s\n", GetHost(server.URL), GetMaxValue(totalUploads)/125000)
+		fmt.Printf("  %s: %0.3fMbit/s (used %dMB)\n", GetHost(server.URL), uploadSpeed/125000, (i+1)*upMeasureMB)
 	}
 }
